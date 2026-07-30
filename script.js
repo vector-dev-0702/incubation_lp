@@ -1,266 +1,205 @@
+const prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+/* Existing scroll-reveal */
 const observer = new IntersectionObserver((entries, observer) => {
-
     entries.forEach(entry => {
-
-        if(entry.isIntersecting){
+        if (entry.isIntersecting) {
             entry.target.classList.add("show");
             observer.unobserve(entry.target);
         }
-
     });
-
 }, {
-    threshold:0.25
+    threshold: 0.25
 });
 
-document.querySelectorAll(".fade-up").forEach(el=>{
+document.querySelectorAll(".fade-up").forEach(el => {
     observer.observe(el);
 });
 
-/* Shared scroll-reactive velocity (calm base → boost on scroll → soft decelerate) */
-const createScrollVelocity = ({
-    base = 0.35,
-    boost = 2.4,
-    lerp = 0.08,
-    idleMs = 180,
-} = {}) => {
-    let velocity = base;
-    let targetVelocity = base;
-    let idleTimer = null;
+/* Mark first-view CTAs ready after entrance so hover/breathe can own transform */
+function armAnimReady(el) {
+    const enable = () => {
+        if (!el.classList.contains("anim-ready")) {
+            el.classList.add("anim-ready");
+        }
+    };
+    el.addEventListener("animationend", (event) => {
+        if (event.target === el && event.animationName === "fadeUp") {
+            enable();
+        }
+    });
+    window.setTimeout(enable, 2600);
+}
 
-    const boostNow = () => {
-        targetVelocity = boost;
-        clearTimeout(idleTimer);
-        idleTimer = setTimeout(() => {
-            targetVelocity = base;
-        }, idleMs);
+document.querySelectorAll(".first-section .pc-hero-cta .span-btns span, .first-section .pc-hero-cta .hero-cta-btn")
+    .forEach(armAnimReady);
+
+/* ------------------------------------------------------------
+   Fixed logo — hover burst with graceful fade-out
+   ------------------------------------------------------------ */
+(function initLogoMotion() {
+    if (prefersReducedMotion) return;
+
+    const wrap = document.querySelector(".bg-logo-wrapper");
+    const img = wrap?.querySelector("img");
+    if (!wrap || !img) return;
+
+    let fadeTimer = 0;
+
+    const heat = () => {
+        window.clearTimeout(fadeTimer);
+        wrap.classList.remove("is-logo-fading");
+        wrap.classList.add("is-logo-hot");
     };
 
-    const tick = () => {
-        velocity += (targetVelocity - velocity) * lerp;
-        return velocity;
+    const cool = () => {
+        wrap.classList.remove("is-logo-hot");
+        wrap.classList.add("is-logo-fading");
+        fadeTimer = window.setTimeout(() => {
+            wrap.classList.remove("is-logo-fading");
+        }, 1100);
     };
 
-    const bind = (scroller) => {
-        scroller.addEventListener("wheel", boostNow, { passive: true });
-        scroller.addEventListener("scroll", boostNow, { passive: true });
-        scroller.addEventListener("touchmove", boostNow, { passive: true });
-    };
+    wrap.addEventListener("mouseenter", heat);
+    wrap.addEventListener("mouseleave", cool);
+    img.addEventListener("focus", heat);
+    img.addEventListener("blur", cool);
+})();
 
-    return { tick, bind, boostNow };
-};
+/* ------------------------------------------------------------
+   Heading gear — accelerate on heading hover, ease out on leave
+   ------------------------------------------------------------ */
+(function initHeadingGear() {
+    if (prefersReducedMotion) return;
 
-const getMainScroller = () => document.querySelector("main") || window;
+    const trigger = document.querySelector("[data-gear-trigger]");
+    const gear = document.querySelector(".heading-gear");
+    if (!trigger || !gear) return;
 
-/* Flow-section diagonal band marquee (scoped) */
-(() => {
-    const section = document.querySelector(".flow-section");
-    if (!section) return;
+    let outTimer = 0;
 
-    const rails = section.querySelectorAll(".flow-strip__rail");
-    if (!rails.length) return;
-
-    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    if (reduceMotion) return;
-
-    const velocity = createScrollVelocity({
-        base: 0.35,
-        boost: 2.4,
-        lerp: 0.08,
-        idleMs: 160,
+    trigger.addEventListener("mouseenter", () => {
+        window.clearTimeout(outTimer);
+        gear.classList.remove("is-gear-easing");
+        gear.classList.add("is-gear-hot");
     });
 
-    let offset = 0;
-    let seqWidth = 0;
+    trigger.addEventListener("mouseleave", () => {
+        gear.classList.remove("is-gear-hot");
+        gear.classList.add("is-gear-easing");
+        outTimer = window.setTimeout(() => {
+            gear.classList.remove("is-gear-easing");
+        }, 900);
+    });
+})();
 
-    const measure = () => {
-        const seq = section.querySelector(".flow-strip__seq");
-        seqWidth = seq ? seq.offsetWidth : 0;
-    };
+/* ------------------------------------------------------------
+   Unified flow strips — seamless marquee + scroll acceleration
+   ------------------------------------------------------------ */
+(function initFlowMarquees() {
+    if (prefersReducedMotion) return;
 
-    const frame = () => {
-        const v = velocity.tick();
-        if (seqWidth > 0) {
-            offset = (offset + v) % seqWidth;
-            const t = `translate3d(${-offset}px, 0, 0)`;
-            rails.forEach((rail) => {
-                rail.style.transform = t;
-            });
+    const marquees = Array.from(document.querySelectorAll(
+        ".hero-bg > .top-strip .flow-marquee, .hero-bg > .bottom-strip .flow-marquee, .first-section > .bottom-strip .flow-marquee, .incubation-band .flow-marquee"
+    ));
+    if (!marquees.length) return;
+
+    const IDLE_CYCLE_MS = 26000;
+    const BOOST_MULTIPLIER = 7.5;
+    const SPEED_LERP_UP = 0.14;
+    const SPEED_LERP_DOWN = 0.045;
+    const BOOST_HOLD_MS = 420;
+
+    const tracks = marquees.map(root => {
+        const inner = root.querySelector(".flow-marquee__inner");
+        const chunk = root.querySelector(".flow-marquee__chunk");
+        const flow = root.getAttribute("data-flow");
+        /* up ≈ along diagonal toward top (local +X); down ≈ opposite */
+        const flowsRight = flow === "right" || flow === "up";
+        return { inner, chunk, flowsRight, offset: 0, segWidth: 0 };
+    });
+
+    let idleSpeed = 0;
+    let currentSpeed = 0;
+    let targetSpeed = 0;
+    let boostTimer = 0;
+    let lastTs = 0;
+    let running = true;
+
+    function measure() {
+        let referenceWidth = 0;
+        for (const track of tracks) {
+            if (!track.chunk) continue;
+            /* offsetWidth = layout width along the track (correct under parent rotate) */
+            track.segWidth = track.chunk.offsetWidth || track.chunk.getBoundingClientRect().width;
+            if (!referenceWidth && track.segWidth) referenceWidth = track.segWidth;
         }
-        requestAnimationFrame(frame);
-    };
+        if (!referenceWidth) return;
+        idleSpeed = referenceWidth / IDLE_CYCLE_MS;
+        if (currentSpeed === 0) currentSpeed = idleSpeed;
+        if (targetSpeed === 0) targetSpeed = idleSpeed;
+    }
 
     measure();
     window.addEventListener("resize", measure, { passive: true });
 
-    velocity.bind(getMainScroller());
+    function onScrollIntent() {
+        if (!idleSpeed) measure();
+        targetSpeed = idleSpeed * BOOST_MULTIPLIER;
+        window.clearTimeout(boostTimer);
+        boostTimer = window.setTimeout(() => {
+            targetSpeed = idleSpeed;
+        }, BOOST_HOLD_MS);
+    }
 
-    requestAnimationFrame(frame);
-})();
+    const main = document.querySelector("main");
+    const wheelOpts = { passive: true };
+    window.addEventListener("wheel", onScrollIntent, wheelOpts);
+    if (main) {
+        main.addEventListener("wheel", onScrollIntent, wheelOpts);
+        main.addEventListener("scroll", onScrollIntent, { passive: true });
+    }
 
-/* Top / bottom Incubation bands — opposite directions, scroll-reactive */
-(() => {
-    const topStrips = Array.from(document.querySelectorAll(".top-strip"));
-    const bottomStrips = Array.from(document.querySelectorAll(".bottom-strip"));
-    if (!topStrips.length && !bottomStrips.length) return;
+    function frame(ts) {
+        if (!running) return;
+        if (!lastTs) lastTs = ts;
+        const dt = Math.min(32, ts - lastTs);
+        lastTs = ts;
 
-    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    if (reduceMotion) return;
+        if (!idleSpeed) measure();
 
-    const velocity = createScrollVelocity({
-        base: 0.28,
-        boost: 2.1,
-        lerp: 0.07,
-        idleMs: 200,
-    });
+        const lerp = currentSpeed < targetSpeed ? SPEED_LERP_UP : SPEED_LERP_DOWN;
+        currentSpeed += (targetSpeed - currentSpeed) * lerp;
 
-    let offset = 0;
-    let tileWidth = 0;
+        const delta = currentSpeed * dt;
 
-    const measureTile = () => {
-        const probe = topStrips[0] || bottomStrips[0];
-        if (!probe) return;
+        for (const track of tracks) {
+            if (!track.segWidth) continue;
 
-        const bg = getComputedStyle(probe).backgroundImage;
-        const match = bg && bg.match(/url\(["']?(.*?)["']?\)/);
-        if (!match) return;
+            track.offset += delta;
+            if (track.offset >= track.segWidth) {
+                track.offset -= track.segWidth;
+            }
 
-        const img = new Image();
-        img.onload = () => {
-            const h = probe.offsetHeight || 28;
-            const scale = h / (img.naturalHeight || h);
-            tileWidth = (img.naturalWidth || 200) * scale;
-        };
-        img.src = match[1];
-    };
+            const x = track.flowsRight
+                ? track.offset - track.segWidth
+                : -track.offset;
 
-    const frame = () => {
-        const v = velocity.tick();
-        offset += v;
-
-        const mod = tileWidth > 0 ? tileWidth : 240;
-        const topPos = -((offset % mod) + mod) % mod;
-        const bottomPos = ((offset % mod) + mod) % mod;
-
-        /* Top ←←←  /  Bottom →→→ */
-        topStrips.forEach((el) => {
-            el.style.backgroundPosition = `${topPos}px 0`;
-        });
-        bottomStrips.forEach((el) => {
-            el.style.backgroundPosition = `${bottomPos}px 0`;
-        });
+            track.inner.style.transform = `translate3d(${x}px, 0, 0)`;
+        }
 
         requestAnimationFrame(frame);
-    };
-
-    measureTile();
-    window.addEventListener("resize", measureTile, { passive: true });
-
-    velocity.bind(getMainScroller());
+    }
 
     requestAnimationFrame(frame);
-})();
 
-/* =========================================================
-   Assignment 2 — Desktop drag scrolling (mobile-like on main)
-   Drag up → scroll down / Drag down → scroll up
-   Does not replace wheel, touchpad, keyboard, or touch scroll
-   ========================================================= */
-(() => {
-    const main = document.querySelector("main");
-    if (!main) return;
-
-    const desktopMq = window.matchMedia("(hover: hover) and (pointer: fine)");
-    const isDesktopPointer = () => desktopMq.matches;
-
-    const INTERACTIVE = "button, a, input, textarea, select, label, [role='button']";
-
-    let active = false;
-    let moved = false;
-    let startY = 0;
-    let startScroll = 0;
-    let lastY = 0;
-    let lastT = 0;
-    let velY = 0; // finger px / ms
-    let inertiaRaf = null;
-
-    const stopInertia = () => {
-        if (inertiaRaf) {
-            cancelAnimationFrame(inertiaRaf);
-            inertiaRaf = null;
+    document.addEventListener("visibilitychange", () => {
+        if (document.hidden) {
+            running = false;
+            lastTs = 0;
+        } else {
+            running = true;
+            requestAnimationFrame(frame);
         }
-    };
-
-    const runInertia = (scrollVel) => {
-        stopInertia();
-        let v = scrollVel;
-
-        const step = () => {
-            if (Math.abs(v) < 0.05) {
-                inertiaRaf = null;
-                return;
-            }
-            main.scrollTop += v;
-            v *= 0.94; // soft deceleration
-            inertiaRaf = requestAnimationFrame(step);
-        };
-
-        inertiaRaf = requestAnimationFrame(step);
-    };
-
-    const endDrag = () => {
-        if (!active) return;
-        active = false;
-        main.classList.remove("is-drag-scrolling");
-        document.body.style.removeProperty("cursor");
-
-        if (moved) {
-            // Finger up (negative velY) → content moves up → scrollTop increases
-            runInertia(-velY * 14);
-        }
-        moved = false;
-    };
-
-    main.addEventListener("mousedown", (e) => {
-        if (!isDesktopPointer()) return;
-        if (e.button !== 0) return;
-        if (e.target.closest(INTERACTIVE)) return;
-
-        stopInertia();
-        active = true;
-        moved = false;
-        startY = e.clientY;
-        startScroll = main.scrollTop;
-        lastY = e.clientY;
-        lastT = performance.now();
-        velY = 0;
-
-        main.classList.add("is-drag-scrolling");
-        document.body.style.cursor = "grabbing";
-        e.preventDefault();
-    });
-
-    window.addEventListener("mousemove", (e) => {
-        if (!active) return;
-
-        const dy = e.clientY - startY;
-        if (Math.abs(dy) > 3) moved = true;
-
-        // Drag up → page scrolls down (like pushing a phone screen)
-        main.scrollTop = startScroll - dy;
-
-        const now = performance.now();
-        const dt = Math.max(8, now - lastT);
-        velY = (e.clientY - lastY) / dt;
-        lastY = e.clientY;
-        lastT = now;
-    });
-
-    window.addEventListener("mouseup", endDrag);
-    window.addEventListener("blur", endDrag);
-
-    // Prevent native image drag ghost while interacting with the column
-    main.addEventListener("dragstart", (e) => {
-        if (isDesktopPointer()) e.preventDefault();
     });
 })();
